@@ -1,0 +1,1143 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write project files
+        run: |
+          set -e
+          mkdir -p QemuLab
+          cat > QemuLab/README.md <<'QLEOF'
+          # QemuLab
+
+          Frontend Android untuk menjalankan mesin virtual QEMU, dengan UI **Material 3 Expressive**
+          (Jetpack Compose `material3:1.4.0` stabil): sudut sangat membulat, animasi pegas, warna dinamis.
+
+          ## Cara build
+          1. Buka folder ini di **Android Studio** (Ladybug atau lebih baru). Gradle wrapper dibuat otomatis saat sync.
+          2. **Taruh binary QEMU** (lihat bawah), lalu `Build > Build APK(s)`.
+
+          ## Binary QEMU (wajib)
+          APK tidak bisa menjalankan VM tanpa binary QEMU untuk Android arm64. Aplikasi mencari binary di
+          `nativeLibraryDir`, jadi namanya harus berawalan `lib` dan berakhiran `.so`:
+
+          ```
+          app/src/main/jniLibs/arm64-v8a/libqemu-system-x86_64.so    # qemu-system-x86_64
+          app/src/main/jniLibs/arm64-v8a/libqemu-system-aarch64.so   # qemu-system-aarch64
+          ```
+          Jika QEMU kamu butuh library lain (glib, pixman, dll.), taruh juga di folder yang sama sebagai `lib*.so`
+          (aplikasi sudah mengatur `LD_LIBRARY_PATH`). Binary bisa diambil dari build QEMU untuk Termux
+          (`pkg install qemu-system-x86-64` lalu salin berkasnya) atau di-cross-compile dengan Android NDK.
+          Pastikan lisensi GPL QEMU dipenuhi bila APK didistribusikan.
+
+          Untuk VM ARM64, taruh firmware UEFI di `files/firmware/QEMU_EFI.fd` (di dalam data aplikasi).
+
+          ## Cara pakai
+          - **VM baru** → atur nama, arsitektur, RAM, CPU, ukuran disk (raw sparse), pilih ISO (disalin ke penyimpanan aplikasi).
+          - **Jalankan** → QEMU dijalankan dengan `-vnc 127.0.0.1:N`. Sambungkan aplikasi klien VNC ke `127.0.0.1:590N`
+            (port tampil di kartu VM). Output serial muncul di panel Konsol.
+
+          ## Batasan saat ini
+          - Belum ada viewer VNC bawaan; gunakan klien VNC eksternal.
+          - Emulasi memakai TCG (tanpa KVM), jadi lambat. Jangan beri RAM terlalu besar.
+          - Proses berjalan di proses aplikasi; Android bisa mematikannya saat di latar belakang
+            (langkah berikutnya: foreground service).
+          - Kode ini belum dikompilasi di lingkungan pembuatnya; kemungkinan perlu penyesuaian kecil pada
+            nama API Material 3 Expressive bila versi library berbeda.
+          QLEOF
+          mkdir -p QemuLab/app
+          cat > QemuLab/app/build.gradle.kts <<'QLEOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "id.qemulab"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "id.qemulab"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0"
+                  ndk { abiFilters += listOf("arm64-v8a") }
+              }
+
+              buildTypes {
+                  release { isMinifyEnabled = false }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+
+              // Wajib: library native diekstrak ke nativeLibraryDir agar binary QEMU bisa dieksekusi.
+              packaging { jniLibs { useLegacyPackaging = true } }
+          }
+
+          dependencies {
+              val bom = platform("androidx.compose:compose-bom:2025.09.00")
+              implementation(bom)
+              implementation("androidx.compose.material3:material3:1.4.0")
+              implementation("androidx.compose.material:material-icons-core")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.activity:activity-compose:1.10.1")
+              implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.0")
+              implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.0")
+              implementation("androidx.core:core-ktx:1.16.0")
+              debugImplementation("androidx.compose.ui:ui-tooling")
+          }
+          QLEOF
+          mkdir -p QemuLab/app/src/main
+          cat > QemuLab/app/src/main/AndroidManifest.xml <<'QLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="@string/app_name"
+                  android:theme="@style/Theme.QemuLab">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          QLEOF
+          mkdir -p QemuLab/app/src/main/java/id/qemulab
+          cat > QemuLab/app/src/main/java/id/qemulab/MainActivity.kt <<'QLEOF'
+          package id.qemulab
+
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.lifecycle.compose.collectAsStateWithLifecycle
+          import androidx.lifecycle.viewmodel.compose.viewModel
+          import id.qemulab.data.VmConfig
+          import id.qemulab.ui.ConsoleSheet
+          import id.qemulab.ui.EditVmSheet
+          import id.qemulab.ui.HomeScreen
+          import id.qemulab.ui.QemuLabTheme
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  enableEdgeToEdge()
+                  setContent { QemuLabTheme { QemuLabApp() } }
+              }
+          }
+
+          @Composable
+          fun QemuLabApp(vm: VmViewModel = viewModel()) {
+              val vms by vm.vms.collectAsStateWithLifecycle()
+              val running by vm.runner.running.collectAsStateWithLifecycle()
+              val logs by vm.runner.logs.collectAsStateWithLifecycle()
+              val importing by vm.importing.collectAsStateWithLifecycle()
+
+              var editing by remember { mutableStateOf<VmConfig?>(null) }
+              var consoleId by remember { mutableStateOf<String?>(null) }
+
+              HomeScreen(
+                  vms = vms,
+                  running = running,
+                  binaryOk = vm.runner::hasBinary,
+                  onAdd = { editing = vm.newConfig() },
+                  onEdit = { editing = it },
+                  onDelete = vm::delete,
+                  onStart = { vm.start(it); consoleId = it.id },
+                  onStop = vm::stop,
+                  onConsole = { consoleId = it.id },
+              )
+
+              editing?.let { cfg ->
+                  EditVmSheet(
+                      initial = cfg,
+                      importing = importing,
+                      onImport = vm::importImage,
+                      onSave = { vm.save(it); editing = null },
+                      onDismiss = { editing = null },
+                  )
+              }
+
+              consoleId?.let { id ->
+                  vms.firstOrNull { it.id == id }?.let { cfg ->
+                      ConsoleSheet(
+                          vm = cfg,
+                          lines = logs[id].orEmpty(),
+                          isRunning = id in running,
+                          onStop = { vm.stop(cfg) },
+                          onDismiss = { consoleId = null },
+                      )
+                  }
+              }
+          }
+          QLEOF
+          mkdir -p QemuLab/app/src/main/java/id/qemulab
+          cat > QemuLab/app/src/main/java/id/qemulab/VmViewModel.kt <<'QLEOF'
+          package id.qemulab
+
+          import android.app.Application
+          import android.net.Uri
+          import android.provider.OpenableColumns
+          import androidx.lifecycle.AndroidViewModel
+          import androidx.lifecycle.viewModelScope
+          import id.qemulab.data.VmConfig
+          import id.qemulab.data.VmStore
+          import id.qemulab.qemu.QemuRunner
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.flow.MutableStateFlow
+          import kotlinx.coroutines.flow.StateFlow
+          import kotlinx.coroutines.flow.asStateFlow
+          import kotlinx.coroutines.flow.update
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+          import java.io.File
+          import java.io.RandomAccessFile
+
+          class VmViewModel(app: Application) : AndroidViewModel(app) {
+
+              private val store = VmStore(app)
+              val runner = QemuRunner(app)
+
+              private val imagesDir = File(app.filesDir, "images").apply { mkdirs() }
+
+              private val _vms = MutableStateFlow(store.load())
+              val vms: StateFlow<List<VmConfig>> = _vms.asStateFlow()
+
+              /** Nama berkas yang sedang disalin (null bila tidak ada). */
+              private val _importing = MutableStateFlow<String?>(null)
+              val importing: StateFlow<String?> = _importing.asStateFlow()
+
+              fun newConfig() = VmConfig(vncDisplay = (_vms.value.maxOfOrNull { it.vncDisplay } ?: 0) + 1)
+
+              fun save(vm: VmConfig) {
+                  viewModelScope.launch(Dispatchers.IO) {
+                      var v = vm
+                      if (v.diskPath.isBlank()) {
+                          val f = File(imagesDir, "${v.id}.img")
+                          RandomAccessFile(f, "rw").use { it.setLength(v.diskGb * 1024L * 1024L * 1024L) }
+                          v = v.copy(diskPath = f.absolutePath)
+                      }
+                      _vms.update { list ->
+                          if (list.any { it.id == v.id }) list.map { if (it.id == v.id) v else it } else list + v
+                      }
+                      store.save(_vms.value)
+                  }
+              }
+
+              fun delete(vm: VmConfig) {
+                  runner.stop(vm.id)
+                  viewModelScope.launch(Dispatchers.IO) {
+                      File(vm.diskPath).delete()
+                      _vms.update { list -> list.filterNot { it.id == vm.id } }
+                      store.save(_vms.value)
+                  }
+              }
+
+              fun start(vm: VmConfig) = runner.start(vm)
+              fun stop(vm: VmConfig) = runner.stop(vm.id)
+
+              /** Salin ISO/disk pilihan pengguna ke penyimpanan aplikasi supaya QEMU bisa membukanya lewat path. */
+              fun importImage(uri: Uri, onDone: (String) -> Unit) {
+                  viewModelScope.launch {
+                      val resolver = getApplication<Application>().contentResolver
+                      val name = withContext(Dispatchers.IO) {
+                          runCatching {
+                              resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                                  if (it.moveToFirst()) it.getString(0) else null
+                              }
+                          }.getOrNull()
+                      } ?: "image-${System.currentTimeMillis()}.iso"
+                      _importing.value = name
+                      val path = withContext(Dispatchers.IO) {
+                          val out = File(imagesDir, name)
+                          resolver.openInputStream(uri)?.use { input ->
+                              out.outputStream().use { input.copyTo(it) }
+                          }
+                          out.absolutePath
+                      }
+                      _importing.value = null
+                      onDone(path)
+                  }
+              }
+          }
+          QLEOF
+          mkdir -p QemuLab/app/src/main/java/id/qemulab/data
+          cat > QemuLab/app/src/main/java/id/qemulab/data/VmConfig.kt <<'QLEOF'
+          package id.qemulab.data
+
+          import android.content.Context
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.File
+          import java.util.UUID
+
+          enum class Arch(val label: String, val short: String, val binary: String) {
+              X86_64("x86_64", "x86", "libqemu-system-x86_64.so"),
+              AARCH64("ARM64", "ARM", "libqemu-system-aarch64.so"),
+          }
+
+          data class VmConfig(
+              val id: String = UUID.randomUUID().toString(),
+              val name: String = "VM baru",
+              val arch: Arch = Arch.X86_64,
+              val ramMb: Int = 1024,
+              val cores: Int = 2,
+              val diskGb: Int = 8,
+              val diskPath: String = "",
+              val isoPath: String = "",
+              val vncDisplay: Int = 1,
+              val extraArgs: String = "",
+          ) {
+              val vncPort get() = 5900 + vncDisplay
+          }
+
+          class VmStore(context: Context) {
+              private val file = File(context.filesDir, "vms.json")
+
+              fun load(): List<VmConfig> = runCatching {
+                  val arr = JSONArray(file.readText())
+                  List(arr.length()) { i ->
+                      val o = arr.getJSONObject(i)
+                      VmConfig(
+                          id = o.getString("id"),
+                          name = o.getString("name"),
+                          arch = Arch.valueOf(o.getString("arch")),
+                          ramMb = o.getInt("ramMb"),
+                          cores = o.getInt("cores"),
+                          diskGb = o.getInt("diskGb"),
+                          diskPath = o.getString("diskPath"),
+                          isoPath = o.getString("isoPath"),
+                          vncDisplay = o.getInt("vncDisplay"),
+                          extraArgs = o.getString("extraArgs"),
+                      )
+                  }
+              }.getOrDefault(emptyList())
+
+              fun save(list: List<VmConfig>) {
+                  val arr = JSONArray()
+                  list.forEach {
+                      arr.put(
+                          JSONObject()
+                              .put("id", it.id).put("name", it.name).put("arch", it.arch.name)
+                              .put("ramMb", it.ramMb).put("cores", it.cores).put("diskGb", it.diskGb)
+                              .put("diskPath", it.diskPath).put("isoPath", it.isoPath)
+                              .put("vncDisplay", it.vncDisplay).put("extraArgs", it.extraArgs)
+                      )
+                  }
+                  file.writeText(arr.toString())
+              }
+          }
+          QLEOF
+          mkdir -p QemuLab/app/src/main/java/id/qemulab/qemu
+          cat > QemuLab/app/src/main/java/id/qemulab/qemu/QemuRunner.kt <<'QLEOF'
+          package id.qemulab.qemu
+
+          import android.content.Context
+          import id.qemulab.data.Arch
+          import id.qemulab.data.VmConfig
+          import kotlinx.coroutines.flow.MutableStateFlow
+          import kotlinx.coroutines.flow.StateFlow
+          import kotlinx.coroutines.flow.asStateFlow
+          import kotlinx.coroutines.flow.update
+          import java.io.File
+          import java.util.concurrent.ConcurrentHashMap
+          import kotlin.concurrent.thread
+
+          /**
+           * Menjalankan binary QEMU yang dibundel sebagai library native
+           * (app/src/main/jniLibs/arm64-v8a/libqemu-system-*.so).
+           * Binary di nativeLibraryDir adalah satu-satunya lokasi yang boleh di-exec di Android 10+.
+           */
+          class QemuRunner(private val context: Context) {
+
+              private val processes = ConcurrentHashMap<String, Process>()
+
+              private val _running = MutableStateFlow<Set<String>>(emptySet())
+              val running: StateFlow<Set<String>> = _running.asStateFlow()
+
+              private val _logs = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+              val logs: StateFlow<Map<String, List<String>>> = _logs.asStateFlow()
+
+              private val nativeDir get() = context.applicationInfo.nativeLibraryDir
+
+              fun binaryFor(arch: Arch) = File(nativeDir, arch.binary)
+              fun hasBinary(arch: Arch) = binaryFor(arch).exists()
+
+              fun buildCommand(vm: VmConfig): List<String> {
+                  val a = mutableListOf(
+                      binaryFor(vm.arch).absolutePath,
+                      "-m", vm.ramMb.toString(),
+                      "-smp", vm.cores.toString(),
+                      "-serial", "stdio",
+                      "-monitor", "none",
+                      "-vnc", "127.0.0.1:${vm.vncDisplay}",
+                      "-netdev", "user,id=n0",
+                      "-device", "virtio-net-pci,netdev=n0",
+                  )
+                  when (vm.arch) {
+                      Arch.X86_64 -> a += listOf(
+                          "-machine", "q35", "-cpu", "max", "-accel", "tcg,thread=multi",
+                          "-device", "VGA", "-device", "qemu-xhci", "-device", "usb-tablet",
+                      )
+                      Arch.AARCH64 -> {
+                          a += listOf(
+                              "-machine", "virt", "-cpu", "cortex-a72", "-accel", "tcg,thread=multi",
+                              "-device", "virtio-gpu-pci", "-device", "qemu-xhci",
+                              "-device", "usb-kbd", "-device", "usb-tablet",
+                          )
+                          val fw = File(context.filesDir, "firmware/QEMU_EFI.fd")
+                          if (fw.exists()) a += listOf("-bios", fw.absolutePath)
+                      }
+                  }
+                  if (vm.diskPath.isNotBlank() && File(vm.diskPath).exists()) {
+                      a += listOf("-drive", "file=${vm.diskPath},if=virtio,format=raw")
+                  }
+                  if (vm.isoPath.isNotBlank() && File(vm.isoPath).exists()) {
+                      a += when (vm.arch) {
+                          Arch.X86_64 -> listOf("-cdrom", vm.isoPath, "-boot", "d")
+                          Arch.AARCH64 -> listOf(
+                              "-device", "virtio-scsi-pci",
+                              "-drive", "if=none,id=cd0,media=cdrom,file=${vm.isoPath}",
+                              "-device", "scsi-cd,drive=cd0",
+                          )
+                      }
+                  }
+                  a += vm.extraArgs.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+                  return a
+              }
+
+              fun start(vm: VmConfig) {
+                  if (processes.containsKey(vm.id)) return
+                  _logs.update { it + (vm.id to emptyList()) }
+
+                  val bin = binaryFor(vm.arch)
+                  if (!bin.exists()) {
+                      log(vm.id, "✗ Binary ${bin.name} tidak ditemukan.")
+                      log(vm.id, "  Taruh di app/src/main/jniLibs/arm64-v8a/ lalu build ulang (lihat README).")
+                      return
+                  }
+                  val cmd = buildCommand(vm)
+                  log(vm.id, "$ " + cmd.joinToString(" "))
+                  log(vm.id, "VNC: 127.0.0.1:${vm.vncPort}")
+                  try {
+                      val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+                      pb.environment()["LD_LIBRARY_PATH"] = nativeDir
+                      pb.directory(context.filesDir)
+                      val p = pb.start()
+                      processes[vm.id] = p
+                      _running.update { it + vm.id }
+                      thread(name = "qemu-${vm.id.take(6)}", isDaemon = true) {
+                          p.inputStream.bufferedReader().forEachLine { log(vm.id, it) }
+                          val code = p.waitFor()
+                          log(vm.id, "— proses berhenti (kode $code)")
+                          processes.remove(vm.id)
+                          _running.update { it - vm.id }
+                      }
+                  } catch (e: Exception) {
+                      log(vm.id, "✗ Gagal menjalankan: ${e.message}")
+                  }
+              }
+
+              fun stop(id: String) {
+                  val p = processes[id] ?: return
+                  p.destroy()
+                  thread(isDaemon = true) {
+                      Thread.sleep(2000)
+                      if (p.isAlive) p.destroyForcibly()
+                  }
+              }
+
+              private fun log(id: String, line: String) {
+                  _logs.update { m -> m + (id to (m[id].orEmpty() + line).takeLast(500)) }
+              }
+          }
+          QLEOF
+          mkdir -p QemuLab/app/src/main/java/id/qemulab/ui
+          cat > QemuLab/app/src/main/java/id/qemulab/ui/ConsoleSheet.kt <<'QLEOF'
+          package id.qemulab.ui
+
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.itemsIndexed
+          import androidx.compose.foundation.lazy.rememberLazyListState
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.ExperimentalMaterial3Api
+          import androidx.compose.material3.FilledTonalButton
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.ModalBottomSheet
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.rememberModalBottomSheetState
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.text.font.FontFamily
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import id.qemulab.data.VmConfig
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun ConsoleSheet(
+              vm: VmConfig,
+              lines: List<String>,
+              isRunning: Boolean,
+              onStop: () -> Unit,
+              onDismiss: () -> Unit,
+          ) {
+              val state = rememberLazyListState()
+              LaunchedEffect(lines.size) {
+                  if (lines.isNotEmpty()) state.animateScrollToItem(lines.lastIndex)
+              }
+
+              ModalBottomSheet(
+                  onDismissRequest = onDismiss,
+                  sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+              ) {
+                  Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
+                      Row(
+                          Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.SpaceBetween,
+                          verticalAlignment = Alignment.CenterVertically,
+                      ) {
+                          Column {
+                              Text(vm.name, style = MaterialTheme.typography.headlineSmall)
+                              Text(
+                                  if (isRunning) "Berjalan · VNC 127.0.0.1:${vm.vncPort}" else "Berhenti",
+                                  style = MaterialTheme.typography.bodyMedium,
+                                  color = if (isRunning) MaterialTheme.colorScheme.primary
+                                  else MaterialTheme.colorScheme.onSurfaceVariant,
+                              )
+                          }
+                          if (isRunning) FilledTonalButton(onClick = onStop) { Text("Hentikan") }
+                      }
+
+                      LazyColumn(
+                          state = state,
+                          modifier = Modifier
+                              .padding(top = 16.dp)
+                              .fillMaxWidth()
+                              .height(420.dp)
+                              .clip(RoundedCornerShape(24.dp))
+                              .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                              .padding(16.dp),
+                      ) {
+                          itemsIndexed(lines) { _, line ->
+                              Text(
+                                  line,
+                                  fontFamily = FontFamily.Monospace,
+                                  fontSize = 12.sp,
+                                  lineHeight = 16.sp,
+                                  color = MaterialTheme.colorScheme.onSurface,
+                              )
+                          }
+                      }
+                  }
+              }
+          }
+          QLEOF
+          mkdir -p QemuLab/app/src/main/java/id/qemulab/ui
+          cat > QemuLab/app/src/main/java/id/qemulab/ui/EditVmSheet.kt <<'QLEOF'
+          package id.qemulab.ui
+
+          import android.net.Uri
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.ExperimentalMaterial3Api
+          import androidx.compose.material3.LinearProgressIndicator
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.ModalBottomSheet
+          import androidx.compose.material3.OutlinedButton
+          import androidx.compose.material3.OutlinedTextField
+          import androidx.compose.material3.SegmentedButton
+          import androidx.compose.material3.SegmentedButtonDefaults
+          import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+          import androidx.compose.material3.Slider
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.rememberModalBottomSheetState
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.unit.dp
+          import id.qemulab.data.Arch
+          import id.qemulab.data.VmConfig
+          import java.io.File
+          import kotlin.math.roundToInt
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun EditVmSheet(
+              initial: VmConfig,
+              importing: String?,
+              onImport: (Uri, (String) -> Unit) -> Unit,
+              onSave: (VmConfig) -> Unit,
+              onDismiss: () -> Unit,
+          ) {
+              var draft by remember { mutableStateOf(initial) }
+              val isNew = initial.diskPath.isBlank()
+
+              val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                  if (uri != null) onImport(uri) { path -> draft = draft.copy(isoPath = path) }
+              }
+
+              ModalBottomSheet(
+                  onDismissRequest = onDismiss,
+                  sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+              ) {
+                  Column(
+                      Modifier
+                          .verticalScroll(rememberScrollState())
+                          .padding(horizontal = 24.dp)
+                          .padding(bottom = 32.dp),
+                      verticalArrangement = Arrangement.spacedBy(16.dp),
+                  ) {
+                      Text(
+                          if (isNew) "VM baru" else "Ubah VM",
+                          style = MaterialTheme.typography.headlineMedium,
+                      )
+
+                      OutlinedTextField(
+                          value = draft.name,
+                          onValueChange = { draft = draft.copy(name = it) },
+                          label = { Text("Nama") },
+                          singleLine = true,
+                          modifier = Modifier.fillMaxWidth(),
+                      )
+
+                      Text("Arsitektur", style = MaterialTheme.typography.titleSmall)
+                      SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                          Arch.entries.forEachIndexed { i, a ->
+                              SegmentedButton(
+                                  selected = draft.arch == a,
+                                  onClick = { draft = draft.copy(arch = a) },
+                                  shape = SegmentedButtonDefaults.itemShape(i, Arch.entries.size),
+                              ) { Text(a.label) }
+                          }
+                      }
+
+                      LabeledSlider("RAM", "${draft.ramMb} MB", draft.ramMb.toFloat(), 512f..8192f) {
+                          draft = draft.copy(ramMb = ((it / 256f).roundToInt() * 256).coerceAtLeast(512))
+                      }
+                      LabeledSlider("CPU", "${draft.cores} inti", draft.cores.toFloat(), 1f..8f) {
+                          draft = draft.copy(cores = it.roundToInt().coerceIn(1, 8))
+                      }
+                      if (isNew) {
+                          LabeledSlider("Disk", "${draft.diskGb} GB", draft.diskGb.toFloat(), 2f..64f) {
+                              draft = draft.copy(diskGb = it.roundToInt().coerceIn(2, 64))
+                          }
+                      } else {
+                          Text(
+                              "Disk: ${draft.diskGb} GB (tetap)",
+                              style = MaterialTheme.typography.bodyMedium,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant,
+                          )
+                      }
+
+                      Text("Image ISO", style = MaterialTheme.typography.titleSmall)
+                      OutlinedButton(
+                          onClick = { picker.launch(arrayOf("*/*")) },
+                          enabled = importing == null,
+                          modifier = Modifier.fillMaxWidth(),
+                      ) {
+                          Text(
+                              if (draft.isoPath.isBlank()) "Pilih berkas ISO…"
+                              else File(draft.isoPath).name
+                          )
+                      }
+                      if (importing != null) {
+                          Text("Menyalin $importing…", style = MaterialTheme.typography.bodySmall)
+                          LinearProgressIndicator(Modifier.fillMaxWidth())
+                      }
+
+                      OutlinedTextField(
+                          value = draft.extraArgs,
+                          onValueChange = { draft = draft.copy(extraArgs = it) },
+                          label = { Text("Argumen QEMU tambahan") },
+                          supportingText = { Text("Contoh: -device virtio-rng-pci") },
+                          modifier = Modifier.fillMaxWidth(),
+                      )
+
+                      Spacer(Modifier.height(4.dp))
+                      Button(
+                          onClick = { onSave(draft) },
+                          enabled = draft.name.isNotBlank() && importing == null,
+                          modifier = Modifier.fillMaxWidth().height(56.dp),
+                      ) { Text(if (isNew) "Buat VM" else "Simpan") }
+                  }
+              }
+          }
+
+          @Composable
+          private fun LabeledSlider(
+              label: String,
+              value: String,
+              current: Float,
+              range: ClosedFloatingPointRange<Float>,
+              onChange: (Float) -> Unit,
+          ) {
+              Column {
+                  androidx.compose.foundation.layout.Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                      Text(label, style = MaterialTheme.typography.titleSmall)
+                      Text(value, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                  }
+                  Slider(value = current, onValueChange = onChange, valueRange = range)
+              }
+          }
+          QLEOF
+          mkdir -p QemuLab/app/src/main/java/id/qemulab/ui
+          cat > QemuLab/app/src/main/java/id/qemulab/ui/HomeScreen.kt <<'QLEOF'
+          package id.qemulab.ui
+
+          import androidx.compose.animation.core.Spring
+          import androidx.compose.animation.core.animateDpAsState
+          import androidx.compose.animation.core.spring
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.PaddingValues
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.Add
+          import androidx.compose.material.icons.filled.Close
+          import androidx.compose.material.icons.filled.Delete
+          import androidx.compose.material.icons.filled.Edit
+          import androidx.compose.material.icons.filled.PlayArrow
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.ButtonDefaults
+          import androidx.compose.material3.CircularProgressIndicator
+          import androidx.compose.material3.ElevatedCard
+          import androidx.compose.material3.ExperimentalMaterial3Api
+          import androidx.compose.material3.ExtendedFloatingActionButton
+          import androidx.compose.material3.FilledTonalButton
+          import androidx.compose.material3.FilledTonalIconButton
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.IconButton
+          import androidx.compose.material3.LargeTopAppBar
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.OutlinedButton
+          import androidx.compose.material3.Scaffold
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TopAppBarDefaults
+          import androidx.compose.runtime.Composable
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.input.nestedscroll.nestedScroll
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.unit.dp
+          import id.qemulab.data.Arch
+          import id.qemulab.data.VmConfig
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun HomeScreen(
+              vms: List<VmConfig>,
+              running: Set<String>,
+              binaryOk: (Arch) -> Boolean,
+              onAdd: () -> Unit,
+              onEdit: (VmConfig) -> Unit,
+              onDelete: (VmConfig) -> Unit,
+              onStart: (VmConfig) -> Unit,
+              onStop: (VmConfig) -> Unit,
+              onConsole: (VmConfig) -> Unit,
+          ) {
+              val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+
+              Scaffold(
+                  modifier = Modifier.nestedScroll(scroll.nestedScrollConnection),
+                  topBar = {
+                      LargeTopAppBar(
+                          title = {
+                              Column {
+                                  Text("QemuLab")
+                                  Text(
+                                      if (running.isEmpty()) "${vms.size} mesin virtual"
+                                      else "${running.size} berjalan · ${vms.size} mesin virtual",
+                                      style = MaterialTheme.typography.bodyMedium,
+                                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                  )
+                              }
+                          },
+                          scrollBehavior = scroll,
+                      )
+                  },
+                  floatingActionButton = {
+                      ExtendedFloatingActionButton(
+                          onClick = onAdd,
+                          icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                          text = { Text("VM baru") },
+                      )
+                  },
+              ) { inner ->
+                  if (vms.isEmpty()) {
+                      EmptyState(Modifier.padding(inner).fillMaxSize())
+                  } else {
+                      LazyColumn(
+                          modifier = Modifier.fillMaxSize(),
+                          contentPadding = PaddingValues(
+                              start = 16.dp, end = 16.dp,
+                              top = inner.calculateTopPadding() + 8.dp,
+                              bottom = inner.calculateBottomPadding() + 96.dp,
+                          ),
+                          verticalArrangement = Arrangement.spacedBy(12.dp),
+                      ) {
+                          items(vms, key = { it.id }) { vm ->
+                              VmCard(
+                                  vm = vm,
+                                  isRunning = vm.id in running,
+                                  binaryOk = binaryOk(vm.arch),
+                                  onEdit = { onEdit(vm) },
+                                  onDelete = { onDelete(vm) },
+                                  onStart = { onStart(vm) },
+                                  onStop = { onStop(vm) },
+                                  onConsole = { onConsole(vm) },
+                              )
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun VmCard(
+              vm: VmConfig,
+              isRunning: Boolean,
+              binaryOk: Boolean,
+              onEdit: () -> Unit,
+              onDelete: () -> Unit,
+              onStart: () -> Unit,
+              onStop: () -> Unit,
+              onConsole: () -> Unit,
+          ) {
+              // Bentuk lencana "morph" dari kotak membulat ke lingkaran saat VM berjalan (gerak pegas ala Expressive).
+              val corner by animateDpAsState(
+                  targetValue = if (isRunning) 28.dp else 16.dp,
+                  animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+                  label = "badgeCorner",
+              )
+
+              ElevatedCard(shape = RoundedCornerShape(32.dp), modifier = Modifier.fillMaxWidth()) {
+                  Column(Modifier.padding(20.dp)) {
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          Box(
+                              Modifier
+                                  .size(56.dp)
+                                  .clip(RoundedCornerShape(corner))
+                                  .background(
+                                      if (isRunning) MaterialTheme.colorScheme.primary
+                                      else MaterialTheme.colorScheme.secondaryContainer
+                                  ),
+                              contentAlignment = Alignment.Center,
+                          ) {
+                              Text(
+                                  vm.arch.short,
+                                  style = MaterialTheme.typography.labelLarge,
+                                  fontWeight = FontWeight.Bold,
+                                  color = if (isRunning) MaterialTheme.colorScheme.onPrimary
+                                  else MaterialTheme.colorScheme.onSecondaryContainer,
+                              )
+                          }
+                          Spacer(Modifier.width(16.dp))
+                          Column(Modifier.weight(1f)) {
+                              Text(vm.name, style = MaterialTheme.typography.titleLarge)
+                              Text(
+                                  "${vm.arch.label} · ${vm.cores} CPU · ${vm.ramMb} MB · ${vm.diskGb} GB",
+                                  style = MaterialTheme.typography.bodyMedium,
+                                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                              )
+                              if (isRunning) {
+                                  Text(
+                                      "VNC 127.0.0.1:${vm.vncPort}",
+                                      style = MaterialTheme.typography.labelMedium,
+                                      color = MaterialTheme.colorScheme.primary,
+                                  )
+                              }
+                          }
+                          if (isRunning) CircularProgressIndicator(Modifier.size(32.dp), strokeWidth = 4.dp)
+                      }
+
+                      if (!binaryOk) {
+                          Spacer(Modifier.height(12.dp))
+                          Text(
+                              "Binary QEMU ${vm.arch.label} belum disertakan di APK.",
+                              style = MaterialTheme.typography.bodySmall,
+                              color = MaterialTheme.colorScheme.error,
+                          )
+                      }
+
+                      Spacer(Modifier.height(16.dp))
+                      Row(
+                          Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(8.dp),
+                          verticalAlignment = Alignment.CenterVertically,
+                      ) {
+                          if (isRunning) {
+                              FilledTonalButton(
+                                  onClick = onStop,
+                                  colors = ButtonDefaults.filledTonalButtonColors(
+                                      containerColor = MaterialTheme.colorScheme.errorContainer,
+                                      contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                  ),
+                              ) {
+                                  Icon(Icons.Filled.Close, null, Modifier.size(18.dp))
+                                  Spacer(Modifier.width(8.dp))
+                                  Text("Hentikan")
+                              }
+                              OutlinedButton(onClick = onConsole) { Text("Konsol") }
+                          } else {
+                              Button(onClick = onStart) {
+                                  Icon(Icons.Filled.PlayArrow, null, Modifier.size(18.dp))
+                                  Spacer(Modifier.width(8.dp))
+                                  Text("Jalankan")
+                              }
+                              OutlinedButton(onClick = onConsole) { Text("Log") }
+                          }
+                          Spacer(Modifier.weight(1f))
+                          FilledTonalIconButton(onClick = onEdit, enabled = !isRunning) {
+                              Icon(Icons.Filled.Edit, contentDescription = "Ubah")
+                          }
+                          IconButton(onClick = onDelete, enabled = !isRunning) {
+                              Icon(Icons.Filled.Delete, contentDescription = "Hapus")
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun EmptyState(modifier: Modifier = Modifier) {
+              Column(
+                  modifier.padding(32.dp),
+                  horizontalAlignment = Alignment.CenterHorizontally,
+                  verticalArrangement = Arrangement.Center,
+              ) {
+                  Box(
+                      Modifier
+                          .size(160.dp)
+                          .clip(RoundedCornerShape(56.dp))
+                          .background(MaterialTheme.colorScheme.tertiaryContainer),
+                      contentAlignment = Alignment.Center,
+                  ) {
+                      Text(
+                          "Q",
+                          style = MaterialTheme.typography.displayLarge,
+                          fontWeight = FontWeight.Bold,
+                          color = MaterialTheme.colorScheme.onTertiaryContainer,
+                      )
+                  }
+                  Spacer(Modifier.height(24.dp))
+                  Text("Belum ada mesin virtual", style = MaterialTheme.typography.headlineSmall)
+                  Spacer(Modifier.height(8.dp))
+                  Text(
+                      "Ketuk “VM baru” untuk membuat VM pertamamu, lalu pilih ISO untuk dipasang.",
+                      style = MaterialTheme.typography.bodyLarge,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                      textAlign = TextAlign.Center,
+                  )
+              }
+          }
+          QLEOF
+          mkdir -p QemuLab/app/src/main/java/id/qemulab/ui
+          cat > QemuLab/app/src/main/java/id/qemulab/ui/Theme.kt <<'QLEOF'
+          package id.qemulab.ui
+
+          import android.os.Build
+          import androidx.compose.foundation.isSystemInDarkTheme
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Shapes
+          import androidx.compose.material3.darkColorScheme
+          import androidx.compose.material3.dynamicDarkColorScheme
+          import androidx.compose.material3.dynamicLightColorScheme
+          import androidx.compose.material3.lightColorScheme
+          import androidx.compose.runtime.Composable
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.unit.dp
+
+          /** Gaya Expressive: warna dinamis + sudut sangat membulat, memakai API Material 3 stabil. */
+          @Composable
+          fun QemuLabTheme(content: @Composable () -> Unit) {
+              val dark = isSystemInDarkTheme()
+              val ctx = LocalContext.current
+              val scheme = when {
+                  Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+                      if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
+                  dark -> darkColorScheme()
+                  else -> lightColorScheme()
+              }
+              val shapes = Shapes(
+                  extraSmall = RoundedCornerShape(12.dp),
+                  small = RoundedCornerShape(16.dp),
+                  medium = RoundedCornerShape(24.dp),
+                  large = RoundedCornerShape(32.dp),
+                  extraLarge = RoundedCornerShape(40.dp),
+              )
+              MaterialTheme(colorScheme = scheme, shapes = shapes, content = content)
+          }
+          QLEOF
+          mkdir -p QemuLab/app/src/main/res/drawable
+          cat > QemuLab/app/src/main/res/drawable/ic_launcher_foreground.xml <<'QLEOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <!-- Monitor -->
+              <path
+                  android:fillColor="#EADDFF"
+                  android:pathData="M30,34h48a4,4 0 0 1 4,4v28a4,4 0 0 1 -4,4H30a4,4 0 0 1 -4,-4V38a4,4 0 0 1 4,-4z" />
+              <path
+                  android:fillColor="#4F378B"
+                  android:pathData="M32,40h44v24H32z" />
+              <!-- Prompt ">_" -->
+              <path
+                  android:fillColor="#EADDFF"
+                  android:pathData="M38,45l8,7l-8,7l-2.5,-2.5l5,-4.5l-5,-4.5z" />
+              <path
+                  android:fillColor="#EADDFF"
+                  android:pathData="M49,56h12v3h-12z" />
+              <!-- Kaki -->
+              <path
+                  android:fillColor="#EADDFF"
+                  android:pathData="M46,72h16v4h-16z" />
+          </vector>
+          QLEOF
+          mkdir -p QemuLab/app/src/main/res/mipmap-anydpi
+          cat > QemuLab/app/src/main/res/mipmap-anydpi/ic_launcher.xml <<'QLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+              <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          QLEOF
+          mkdir -p QemuLab/app/src/main/res/values
+          cat > QemuLab/app/src/main/res/values/colors.xml <<'QLEOF'
+          <resources>
+              <color name="ic_launcher_background">#4F378B</color>
+          </resources>
+          QLEOF
+          mkdir -p QemuLab/app/src/main/res/values
+          cat > QemuLab/app/src/main/res/values/strings.xml <<'QLEOF'
+          <resources>
+              <string name="app_name">QemuLab</string>
+          </resources>
+          QLEOF
+          mkdir -p QemuLab/app/src/main/res/values
+          cat > QemuLab/app/src/main/res/values/themes.xml <<'QLEOF'
+          <resources>
+              <style name="Theme.QemuLab" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:statusBarColor">@android:color/transparent</item>
+                  <item name="android:navigationBarColor">@android:color/transparent</item>
+              </style>
+          </resources>
+          QLEOF
+          mkdir -p QemuLab
+          cat > QemuLab/build.gradle.kts <<'QLEOF'
+          plugins {
+              id("com.android.application") version "8.9.2" apply false
+              id("org.jetbrains.kotlin.android") version "2.1.21" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.1.21" apply false
+          }
+          QLEOF
+          mkdir -p QemuLab
+          cat > QemuLab/gradle.properties <<'QLEOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          QLEOF
+          mkdir -p QemuLab
+          cat > QemuLab/settings.gradle.kts <<'QLEOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "QemuLab"
+          include(":app")
+          QLEOF
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Accept Android licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+      - name: Build debug APK
+        run: |
+          cd QemuLab
+          gradle assembleDebug --no-daemon --console=plain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QemuLab-debug-apk
+          path: "QemuLab/app/build/outputs/apk/debug/*.apk"
