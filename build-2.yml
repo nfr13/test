@@ -1,0 +1,428 @@
+name: Build Settings Replica APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Generate project (Material You Settings replica)
+        run: |
+          mkdir -p app/src/main/java/com/example/settingsclone
+          mkdir -p app/src/main/res/values app/src/main/res/values-night
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SettingsClone"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.0" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.20" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "com.example.settingsclone"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.example.settingsclone"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release { isMinifyEnabled = false }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+          }
+
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.09.03"))
+              implementation("androidx.activity:activity-compose:1.9.2")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+              implementation("androidx.compose.ui:ui")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="Settings"
+                  android:theme="@style/Theme.App">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/themes.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.App" parent="android:Theme.Material.Light.NoActionBar" />
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values-night/themes.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.App" parent="android:Theme.Material.NoActionBar" />
+          </resources>
+          EOF
+
+          cat > app/src/main/java/com/example/settingsclone/MainActivity.kt <<'EOF'
+          package com.example.settingsclone
+
+          import android.os.Build
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.BackHandler
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.isSystemInDarkTheme
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.PaddingValues
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+          import androidx.compose.material.icons.outlined.Accessibility
+          import androidx.compose.material.icons.outlined.Apps
+          import androidx.compose.material.icons.outlined.BatteryFull
+          import androidx.compose.material.icons.outlined.Brightness6
+          import androidx.compose.material.icons.outlined.Devices
+          import androidx.compose.material.icons.outlined.Info
+          import androidx.compose.material.icons.outlined.Key
+          import androidx.compose.material.icons.outlined.LocationOn
+          import androidx.compose.material.icons.outlined.Notifications
+          import androidx.compose.material.icons.outlined.Palette
+          import androidx.compose.material.icons.outlined.Public
+          import androidx.compose.material.icons.outlined.Search
+          import androidx.compose.material.icons.outlined.Security
+          import androidx.compose.material.icons.outlined.SettingsSuggest
+          import androidx.compose.material.icons.outlined.Spa
+          import androidx.compose.material.icons.outlined.Storage
+          import androidx.compose.material.icons.outlined.VolumeUp
+          import androidx.compose.material3.ExperimentalMaterial3Api
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.IconButton
+          import androidx.compose.material3.LargeTopAppBar
+          import androidx.compose.material3.ListItem
+          import androidx.compose.material3.ListItemDefaults
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Scaffold
+          import androidx.compose.material3.Switch
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TopAppBarDefaults
+          import androidx.compose.material3.dynamicDarkColorScheme
+          import androidx.compose.material3.dynamicLightColorScheme
+          import androidx.compose.material3.darkColorScheme
+          import androidx.compose.material3.lightColorScheme
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.input.nestedscroll.nestedScroll
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.unit.dp
+
+          data class SettingItem(val title: String, val summary: String, val icon: ImageVector)
+
+          val settingGroups = listOf(
+              listOf(
+                  SettingItem("Network & internet", "Mobile, Wi-Fi, hotspot", Icons.Outlined.Public),
+                  SettingItem("Connected devices", "Bluetooth, pairing", Icons.Outlined.Devices),
+                  SettingItem("Apps", "Assistant, recent apps, default apps", Icons.Outlined.Apps)
+              ),
+              listOf(
+                  SettingItem("Notifications", "Notification history, conversations", Icons.Outlined.Notifications),
+                  SettingItem("Battery", "100%", Icons.Outlined.BatteryFull),
+                  SettingItem("Storage", "45% used - 70 GB free", Icons.Outlined.Storage),
+                  SettingItem("Sound & vibration", "Volume, haptics, Do Not Disturb", Icons.Outlined.VolumeUp),
+                  SettingItem("Display", "Dark theme, font size, brightness", Icons.Outlined.Brightness6),
+                  SettingItem("Wallpaper & style", "Colors, themed icons, app grid", Icons.Outlined.Palette)
+              ),
+              listOf(
+                  SettingItem("Accessibility", "Display, interaction controls, timers", Icons.Outlined.Accessibility),
+                  SettingItem("Security & privacy", "App security, device lock, permissions", Icons.Outlined.Security),
+                  SettingItem("Location", "On - 12 apps have access", Icons.Outlined.LocationOn),
+                  SettingItem("Passwords & accounts", "Saved passwords, autofill, synced accounts", Icons.Outlined.Key),
+                  SettingItem("Digital Wellbeing", "Screen time, app timers, bedtime", Icons.Outlined.Spa),
+                  SettingItem("System", "Languages, gestures, time, backup", Icons.Outlined.SettingsSuggest),
+                  SettingItem("About phone", "Android device", Icons.Outlined.Info)
+              )
+          )
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  enableEdgeToEdge()
+                  setContent { AppTheme { SettingsApp() } }
+              }
+          }
+
+          @Composable
+          fun AppTheme(content: @Composable () -> Unit) {
+              val dark = isSystemInDarkTheme()
+              val ctx = LocalContext.current
+              val scheme = when {
+                  Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+                      if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
+                  dark -> darkColorScheme()
+                  else -> lightColorScheme()
+              }
+              MaterialTheme(colorScheme = scheme, content = content)
+          }
+
+          @Composable
+          fun SettingsApp() {
+              var selected by remember { mutableStateOf<SettingItem?>(null) }
+              BackHandler(enabled = selected != null) { selected = null }
+              val current = selected
+              if (current == null) {
+                  HomeScreen { selected = it }
+              } else {
+                  DetailScreen(current) { selected = null }
+              }
+          }
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun HomeScreen(onOpen: (SettingItem) -> Unit) {
+              val behavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+              val bg = MaterialTheme.colorScheme.surface
+              Scaffold(
+                  modifier = Modifier.nestedScroll(behavior.nestedScrollConnection),
+                  containerColor = bg,
+                  topBar = {
+                      LargeTopAppBar(
+                          title = { Text("Settings") },
+                          scrollBehavior = behavior,
+                          colors = TopAppBarDefaults.largeTopAppBarColors(
+                              containerColor = bg,
+                              scrolledContainerColor = bg
+                          )
+                      )
+                  }
+              ) { pad ->
+                  LazyColumn(
+                      modifier = Modifier.padding(pad),
+                      contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp)
+                  ) {
+                      item {
+                          Row(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .height(56.dp)
+                                  .clip(CircleShape)
+                                  .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                                  .padding(horizontal = 20.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Icon(Icons.Outlined.Search, contentDescription = null)
+                              Spacer(Modifier.size(16.dp))
+                              Text(
+                                  "Search settings",
+                                  style = MaterialTheme.typography.bodyLarge,
+                                  color = MaterialTheme.colorScheme.onSurfaceVariant
+                              )
+                          }
+                          Spacer(Modifier.height(16.dp))
+                      }
+                      settingGroups.forEach { group ->
+                          group.forEachIndexed { i, entry ->
+                              item(key = entry.title) {
+                                  val big = 28.dp
+                                  val small = 4.dp
+                                  val shape = RoundedCornerShape(
+                                      topStart = if (i == 0) big else small,
+                                      topEnd = if (i == 0) big else small,
+                                      bottomStart = if (i == group.lastIndex) big else small,
+                                      bottomEnd = if (i == group.lastIndex) big else small
+                                  )
+                                  Box(
+                                      modifier = Modifier
+                                          .padding(top = 2.dp)
+                                          .fillMaxWidth()
+                                          .clip(shape)
+                                          .background(MaterialTheme.colorScheme.surfaceContainer)
+                                          .clickable { onOpen(entry) }
+                                  ) {
+                                      ListItem(
+                                          modifier = Modifier.padding(vertical = 4.dp),
+                                          colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                                          leadingContent = { IconBadge(entry.icon) },
+                                          headlineContent = {
+                                              Text(entry.title, style = MaterialTheme.typography.titleMedium)
+                                          },
+                                          supportingContent = { Text(entry.summary) }
+                                      )
+                                  }
+                              }
+                          }
+                          item { Spacer(Modifier.height(16.dp)) }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun IconBadge(icon: ImageVector) {
+              Box(
+                  modifier = Modifier
+                      .size(44.dp)
+                      .clip(CircleShape)
+                      .background(MaterialTheme.colorScheme.primaryContainer),
+                  contentAlignment = Alignment.Center
+              ) {
+                  Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimaryContainer)
+              }
+          }
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun DetailScreen(item: SettingItem, onBack: () -> Unit) {
+              val behavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+              val bg = MaterialTheme.colorScheme.surface
+              var enabled by remember { mutableStateOf(true) }
+              Scaffold(
+                  modifier = Modifier.nestedScroll(behavior.nestedScrollConnection),
+                  containerColor = bg,
+                  topBar = {
+                      LargeTopAppBar(
+                          title = { Text(item.title) },
+                          navigationIcon = {
+                              IconButton(onClick = onBack) {
+                                  Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
+                              }
+                          },
+                          scrollBehavior = behavior,
+                          colors = TopAppBarDefaults.largeTopAppBarColors(
+                              containerColor = bg,
+                              scrolledContainerColor = bg
+                          )
+                      )
+                  }
+              ) { pad ->
+                  LazyColumn(
+                      modifier = Modifier.padding(pad),
+                      contentPadding = PaddingValues(16.dp)
+                  ) {
+                      item {
+                          Box(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .clip(RoundedCornerShape(28.dp))
+                                  .background(MaterialTheme.colorScheme.primaryContainer)
+                                  .clickable { enabled = !enabled }
+                          ) {
+                              ListItem(
+                                  modifier = Modifier.padding(vertical = 8.dp),
+                                  colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                                  headlineContent = {
+                                      Text("Use " + item.title, style = MaterialTheme.typography.titleLarge)
+                                  },
+                                  trailingContent = {
+                                      Switch(checked = enabled, onCheckedChange = { enabled = it })
+                                  }
+                              )
+                          }
+                          Spacer(Modifier.height(16.dp))
+                          Text(
+                              item.summary,
+                              modifier = Modifier.padding(horizontal = 16.dp),
+                              style = MaterialTheme.typography.bodyMedium,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant
+                          )
+                      }
+                  }
+              }
+          }
+          EOF
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SettingsClone-debug
+          path: app/build/outputs/apk/debug/*.apk
