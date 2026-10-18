@@ -1,32 +1,3 @@
-name: Restyle Limbo (Material You)
-
-on:
-  workflow_dispatch:
-
-jobs:
-  restyle:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - name: Unduh APK Limbo dan apktool
-        env:
-          LIMBO_APK_URL: ${{ vars.LIMBO_APK_URL }}
-        run: |
-          set -e
-          if [ -z "$LIMBO_APK_URL" ]; then
-            echo "::error::Variable LIMBO_APK_URL belum diset"
-            exit 1
-          fi
-          curl -fL -o limbo.apk "$LIMBO_APK_URL"
-          curl -fL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
-
-      - name: Decode APK
-        run: java -jar apktool.jar d -f -s limbo.apk -o decoded
-
       - name: Terapkan tema Material You (tanpa dynamic color)
         run: |
           cat > restyle.py <<'PY'
@@ -65,7 +36,8 @@ jobs:
           print('Tema aplikasi:', theme)
 
           def style_pat(name):
-              return re.compile(r'<style name="%s"[^>]*>.*?</style>' % re.escape(name), re.S)
+              # UPDATE: Mendukung tag penuh (<style>...</style>) dan self-closing (<style/>)
+              return re.compile(r'<style name="%s"[^>]*>.*?</style>|<style name="%s"[^>]*/>' % (re.escape(name), re.escape(name)), re.S)
 
           # 2. Cari definisi style tema di values (bukan values-night)
           values_files = [f for f in glob.glob(os.path.join(root, 'res', 'values*', '*.xml'))]
@@ -95,6 +67,11 @@ jobs:
               return keep
 
           def set_items(block, items):
+              # UPDATE: Jika tag self-closing (berakhiran />), ubah menjadi tag pembuka & penutup normal
+              block = block.strip()
+              if block.endswith('/>'):
+                  block = block[:-2] + ">\n</style>"
+
               for k, v in items.items():
                   new = '<item name="%s">%s</item>' % (k, v)
                   pat = re.compile(r'<item name="%s"[^>]*>.*?</item>' % re.escape(k), re.S)
@@ -128,21 +105,3 @@ jobs:
           print('Mode gelap: %d warna diterapkan' % len(dark_items))
           PY
           python3 restyle.py decoded
-
-      - name: Build dan tanda tangan ulang
-        run: |
-          set -e
-          java -jar apktool.jar b decoded -o limbo-unsigned.apk
-          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          keytool -genkeypair -keystore debug.jks -storepass android -keypass android \
-            -alias limbo -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=LimboM3"
-          "$BT/zipalign" -f -p 4 limbo-unsigned.apk limbo-aligned.apk
-          "$BT/apksigner" sign --ks debug.jks --ks-pass pass:android --key-pass pass:android \
-            --ks-key-alias limbo limbo-aligned.apk
-          mkdir -p out
-          cp limbo-aligned.apk out/limbo-m3.apk
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: limbo-m3-apk
-          path: out/limbo-m3.apk
