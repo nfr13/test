@@ -1,0 +1,148 @@
+name: Restyle Limbo (Material You)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  restyle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Unduh APK Limbo dan apktool
+        env:
+          LIMBO_APK_URL: ${{ vars.LIMBO_APK_URL }}
+        run: |
+          set -e
+          if [ -z "$LIMBO_APK_URL" ]; then
+            echo "::error::Variable LIMBO_APK_URL belum diset"
+            exit 1
+          fi
+          curl -fL -o limbo.apk "$LIMBO_APK_URL"
+          curl -fL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
+
+      - name: Decode APK
+        run: java -jar apktool.jar d -f -s limbo.apk -o decoded
+
+      - name: Terapkan tema Material You (tanpa dynamic color)
+        run: |
+          cat > restyle.py <<'PY'
+          import re, os, sys, glob
+
+          root = sys.argv[1]
+
+          # Palet ala Material You (statis, tanpa dynamic color)
+          LIGHT = {
+              'colorPrimary': '#6750A4', 'colorPrimaryDark': '#4F378B', 'colorAccent': '#6750A4',
+              'colorOnPrimary': '#FFFFFF', 'colorSecondary': '#625B71', 'colorOnSecondary': '#FFFFFF',
+              'colorSurface': '#FEF7FF', 'colorOnSurface': '#1D1B20',
+              'colorBackground': '#FEF7FF', 'colorOnBackground': '#1D1B20',
+              'colorControlActivated': '#6750A4', 'colorError': '#B3261E',
+          }
+          DARK = {
+              'colorPrimary': '#D0BCFF', 'colorPrimaryDark': '#141218', 'colorAccent': '#D0BCFF',
+              'colorOnPrimary': '#381E72', 'colorSecondary': '#CCC2DC', 'colorOnSecondary': '#332D41',
+              'colorSurface': '#141218', 'colorOnSurface': '#E6E0E9',
+              'colorBackground': '#141218', 'colorOnBackground': '#E6E0E9',
+              'colorControlActivated': '#D0BCFF', 'colorError': '#F2B8B5',
+          }
+
+          def read(p):
+              return open(p, encoding='utf-8').read()
+
+          def write(p, s):
+              open(p, 'w', encoding='utf-8').write(s)
+
+          # 1. Cari tema aplikasi dari manifest
+          manifest = read(os.path.join(root, 'AndroidManifest.xml'))
+          m = re.search(r'<application[^>]*android:theme="@style/([^"]+)"', manifest, re.S)
+          if not m:
+              sys.exit('ERROR: android:theme aplikasi tidak ditemukan di AndroidManifest.xml')
+          theme = m.group(1)
+          print('Tema aplikasi:', theme)
+
+          def style_pat(name):
+              return re.compile(r'<style name="%s"[^>]*>.*?</style>' % re.escape(name), re.S)
+
+          # 2. Cari definisi style tema di values (bukan values-night)
+          values_files = [f for f in glob.glob(os.path.join(root, 'res', 'values*', '*.xml'))]
+          base_file = None
+          base_block = None
+          for f in values_files:
+              if '-night' in f:
+                  continue
+              mm = style_pat(theme).search(read(f))
+              if mm:
+                  base_file, base_block = f, mm.group(0)
+                  break
+          if not base_file:
+              sys.exit('ERROR: definisi style %s tidak ditemukan' % theme)
+          print('Style tema ditemukan di:', os.path.relpath(base_file, root))
+
+          # 3. Hanya pakai atribut yang benar-benar dideklarasikan di resource aplikasi
+          declared = set()
+          for f in values_files:
+              declared |= set(re.findall(r'<attr name="([^"]+)"', read(f)))
+
+          def usable(items):
+              keep = {k: v for k, v in items.items() if k in declared}
+              skipped = sorted(set(items) - set(keep))
+              if skipped:
+                  print('Atribut dilewati (tidak dideklarasikan):', skipped)
+              return keep
+
+          def set_items(block, items):
+              for k, v in items.items():
+                  new = '<item name="%s">%s</item>' % (k, v)
+                  pat = re.compile(r'<item name="%s"[^>]*>.*?</item>' % re.escape(k), re.S)
+                  if pat.search(block):
+                      block = pat.sub(lambda _: new, block, count=1)
+                  else:
+                      block = block.replace('</style>', '    %s\n</style>' % new, 1)
+              return block
+
+          # 4. Mode terang: ubah style di file asalnya
+          light_items = usable(LIGHT)
+          write(base_file, read(base_file).replace(base_block, set_items(base_block, light_items), 1))
+          print('Mode terang: %d warna diterapkan' % len(light_items))
+
+          # 5. Mode gelap: style values-night dengan isi lengkap (salinan asli + warna gelap)
+          dark_items = usable(DARK)
+          night_dir = os.path.join(root, 'res', 'values-night')
+          os.makedirs(night_dir, exist_ok=True)
+          night_file, night_block = None, None
+          for f in glob.glob(os.path.join(night_dir, '*.xml')):
+              mm = style_pat(theme).search(read(f))
+              if mm:
+                  night_file, night_block = f, mm.group(0)
+                  break
+          if night_file:
+              write(night_file, read(night_file).replace(night_block, set_items(night_block, dark_items), 1))
+          else:
+              new_block = set_items(base_block, dark_items)
+              write(os.path.join(night_dir, 'zz_material_you.xml'),
+                    '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n%s\n</resources>\n' % new_block)
+          print('Mode gelap: %d warna diterapkan' % len(dark_items))
+          PY
+          python3 restyle.py decoded
+
+      - name: Build dan tanda tangan ulang
+        run: |
+          set -e
+          java -jar apktool.jar b decoded -o limbo-unsigned.apk
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          keytool -genkeypair -keystore debug.jks -storepass android -keypass android \
+            -alias limbo -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=LimboM3"
+          "$BT/zipalign" -f -p 4 limbo-unsigned.apk limbo-aligned.apk
+          "$BT/apksigner" sign --ks debug.jks --ks-pass pass:android --key-pass pass:android \
+            --ks-key-alias limbo limbo-aligned.apk
+          mkdir -p out
+          cp limbo-aligned.apk out/limbo-m3.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: limbo-m3-apk
+          path: out/limbo-m3.apk
