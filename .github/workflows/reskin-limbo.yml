@@ -34,7 +34,6 @@ jobs:
 
           root = sys.argv[1]
 
-          # Palet ala Material You (statis, tanpa dynamic color)
           LIGHT = {
               'colorPrimary': '#6750A4', 'colorPrimaryDark': '#4F378B', 'colorAccent': '#6750A4',
               'colorOnPrimary': '#FFFFFF', 'colorSecondary': '#625B71', 'colorOnSecondary': '#FFFFFF',
@@ -50,88 +49,73 @@ jobs:
               'colorControlActivated': '#D0BCFF', 'colorError': '#F2B8B5',
           }
 
-          def read(p):
-              return open(p, encoding='utf-8').read()
+          def read(p): return open(p, encoding='utf-8').read()
+          def write(p, s): open(p, 'w', encoding='utf-8').write(s)
 
-          def write(p, s):
-              open(p, 'w', encoding='utf-8').write(s)
-
-          # 1. Cari tema aplikasi dari manifest
           manifest = read(os.path.join(root, 'AndroidManifest.xml'))
           m = re.search(r'<application[^>]*android:theme="@style/([^"]+)"', manifest, re.S)
-          if not m:
-              sys.exit('ERROR: android:theme aplikasi tidak ditemukan di AndroidManifest.xml')
+          if not m: sys.exit('ERROR: android:theme aplikasi tidak ditemukan')
           theme = m.group(1)
           print('Tema aplikasi:', theme)
 
           def style_pat(name):
-              # PERBAIKAN: Mendukung tag penuh (<style>...</style>) dan self-closing (<style/>)
-              return re.compile(r'<style name="%s"[^>]*>.*?</style>|<style name="%s"[^>]*/>' % (re.escape(name), re.escape(name)), re.S)
+              n = re.escape(name)
+              # Lookbehind (?<!/) mencegah regex "memakan" isi file jika tag ternyata self-closing
+              return re.compile(r'<style[^>]*?name="%s"[^>]*?/>|<style[^>]*?name="%s"[^>]*?(?<!/)>.*?</style>' % (n, n), re.S)
 
-          # 2. Cari definisi style tema di values (bukan values-night)
           values_files = [f for f in glob.glob(os.path.join(root, 'res', 'values*', '*.xml'))]
-          base_file = None
-          base_block = None
+          base_file, base_block = None, None
           for f in values_files:
-              if '-night' in f:
-                  continue
+              if '-night' in f: continue
               mm = style_pat(theme).search(read(f))
               if mm:
                   base_file, base_block = f, mm.group(0)
                   break
-          if not base_file:
-              sys.exit('ERROR: definisi style %s tidak ditemukan' % theme)
-          print('Style tema ditemukan di:', os.path.relpath(base_file, root))
+          if not base_file: sys.exit('ERROR: definisi style %s tidak ditemukan' % theme)
 
-          # 3. Hanya pakai atribut yang benar-benar dideklarasikan di resource aplikasi
           declared = set()
           for f in values_files:
               declared |= set(re.findall(r'<attr name="([^"]+)"', read(f)))
 
           def usable(items):
-              keep = {k: v for k, v in items.items() if k in declared}
-              skipped = sorted(set(items) - set(keep))
-              if skipped:
-                  print('Atribut dilewati (tidak dideklarasikan):', skipped)
-              return keep
+              return {k: v for k, v in items.items() if k in declared}
 
           def set_items(block, items):
-              # PERBAIKAN: Jika tag self-closing (berakhiran />), ubah menjadi tag pembuka & penutup normal
               block = block.strip()
               if block.endswith('/>'):
                   block = block[:-2] + ">\n</style>"
 
               for k, v in items.items():
-                  new = '<item name="%s">%s</item>' % (k, v)
-                  pat = re.compile(r'<item name="%s"[^>]*>.*?</item>' % re.escape(k), re.S)
+                  new = '        <item name="%s">%s</item>' % (k, v)
+                  ik = re.escape(k)
+                  # Pengamanan yang sama untuk tag item
+                  pat = re.compile(r'<item[^>]*?name="%s"[^>]*?/>|<item[^>]*?name="%s"[^>]*?(?<!/)>.*?</item>' % (ik, ik), re.S)
                   if pat.search(block):
                       block = pat.sub(lambda _: new, block, count=1)
                   else:
-                      block = block.replace('</style>', '    %s\n</style>' % new, 1)
+                      block = block.replace('</style>', '%s\n    </style>' % new, 1)
               return block
 
-          # 4. Mode terang: ubah style di file asalnya
           light_items = usable(LIGHT)
           write(base_file, read(base_file).replace(base_block, set_items(base_block, light_items), 1))
-          print('Mode terang: %d warna diterapkan' % len(light_items))
 
-          # 5. Mode gelap: style values-night dengan isi lengkap (salinan asli + warna gelap)
           dark_items = usable(DARK)
           night_dir = os.path.join(root, 'res', 'values-night')
           os.makedirs(night_dir, exist_ok=True)
+          
           night_file, night_block = None, None
           for f in glob.glob(os.path.join(night_dir, '*.xml')):
               mm = style_pat(theme).search(read(f))
               if mm:
                   night_file, night_block = f, mm.group(0)
                   break
+
           if night_file:
               write(night_file, read(night_file).replace(night_block, set_items(night_block, dark_items), 1))
           else:
               new_block = set_items(base_block, dark_items)
               write(os.path.join(night_dir, 'zz_material_you.xml'),
                     '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n%s\n</resources>\n' % new_block)
-          print('Mode gelap: %d warna diterapkan' % len(dark_items))
           PY
           python3 restyle.py decoded
 
